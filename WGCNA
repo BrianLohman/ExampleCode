@@ -1,0 +1,273 @@
+## Restart WGCNA with voom normalized counts
+
+setwd("c:/Users/Lohman/Documents/Stickleback/RNAseq/Heritability_Study/WGCNA")
+rm(list = ls())
+
+library("flashClust")
+library("impute")
+library("WGCNA")
+library("limmaDE2")
+library("ggplot2")
+library("reshape2")
+library("SimSeq")
+library("DESeq2")
+options(stringsAsFactors=FALSE)
+allowWGCNAThreads(7)
+
+load("Input.RData") #this is the min mean filtered and outlier removed counts and design matrix
+
+counts <- counts.mean.filt
+info <- rnaDesign.filt
+
+stats <- pipeLIMMA(counts = counts,
+                   info = info,
+                   block = NULL,
+                   formula = "~ Batch")
+
+lmStats <- stats$stats
+voom <- stats$voom$E #this is the voom normalized expression matrix
+datt <- t(voom)
+
+
+#updated file for MMC analysis THIS FILE CONTAINS ALL THE AVAILBLE TRAITS
+traits <- read.csv("All Data for h2 WGCNA.csv", header = TRUE, row.names = 1)
+
+#Gosling
+traits <- traits[traits$Roberts == "1" ,]
+dim(traits)
+traits <- traits[, c(22, 23, 24, seq(28,38,1), seq(74,76,1))]
+
+datt <- datt[row.names(traits) ,]
+dim(datt)
+
+
+####################
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=28, by=1))
+# Call the network topology analysis function
+sft = pickSoftThreshold(datt, powerVector = powers, verbose = 5,networkType="signed")
+# Plot the results:
+#sizeGrWindow(9, 5)
+#pdf("soft_threshold_signed.pdf",height=4, width=8)
+windows()
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+#dev.off()
+
+#####################
+# making modules
+
+s.th=7 # re-specify according to previous section MAKE SURE THIS IS THE SAME IN ROB AND GOS
+adjacency = adjacency(datt, power = s.th,type="signed");
+TOM = TOMsimilarity(adjacency,TOMType="signed");
+dissTOM = 1-TOM
+# Call the hierarchical clustering function
+geneTree = flashClust(as.dist(dissTOM), method = "average");
+
+save(dissTOM,geneTree,file="Roberts_signedDissTOM_tree.RData")
+
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize = 30;
+# Module identification using dynamic tree cut:
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM,
+                            deepSplit = 2, pamRespectsDendro = FALSE,
+                            minClusterSize = minModuleSize);
+table(dynamicMods)
+dynamicColors = labels2colors(dynamicMods)
+
+# Calculate eigengenes
+MEList = moduleEigengenes(datt, colors = dynamicColors)
+MEs = MEList$eigengenes
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs);
+METree = flashClust(as.dist(MEDiss), method = "average");
+
+save(dynamicMods,dynamicColors,MEs,METree,geneTree,file="Roberts_1stPassModules.RData")
+
+#########################
+
+load("Roberts_1stPassModules.RData")
+
+sizeGrWindow(7, 6)
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+MEDissThres = 0.2
+# Plot the cut line into the dendrogram
+abline(h=MEDissThres, col = "red")
+
+# Call an automatic merging function
+merge = mergeCloseModules(datt, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+# The merged module colors
+mergedColors = merge$colors;
+# Eigengenes of the new merged modules:
+mergedMEs = merge$newMEs
+
+# plotting the fabulous ridiculogram
+windows()
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+
+# Rename to moduleColors
+moduleColors = mergedColors
+# Construct numerical labels corresponding to the colors
+colorOrder = c("grey", standardColors(50));
+moduleLabels = match(moduleColors, colorOrder)-1;
+MEs = mergedMEs;
+
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs);
+# Cluster module eigengenes
+METree = flashClust(as.dist(MEDiss), method = "average");
+# Plot the result
+sizeGrWindow(7, 6)
+windows()
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+
+# how many genes in each module?
+table(moduleColors)
+#moduleColors
+#black        blue       brown        cyan   darkgreen     darkred       green greenyellow      grey60
+#544        1287        1229         194          38         861         828         156          88
+#lightcyan  lightgreen        pink      purple         red      salmon         tan   turquoise
+#93          74         239         252         559         138         148        2350
+
+# Save module colors and labels for use in subsequent parts
+save(MEs, geneTree, moduleLabels, moduleColors, file = "Roberts_networkdata_signed.RData")
+
+###################
+# plotting correlations with traits:
+load("Roberts_networkdata_signed.RData")
+
+# Define numbers of genes and samples
+nGenes = ncol(datt);
+nSamples = nrow(datt);
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(datt, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+
+# correlations of genes with eigengenes
+moduleGeneCor=cor(MEs,datt)
+moduleGenePvalue = corPvalueStudent(moduleGeneCor, nSamples);
+
+moduleTraitCor = cor(MEs, traits, use = "p");
+
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples); #this is the multiple test correction for p-values
+
+# # gene-trait correlations - to make augmented ridiculogram as in mice-men-embryos paper
+#Three.traits <- traits[, c(1,2,32,36,37,38)]
+windows()
+geneTraitCor = cor(datt, traits, use = "p");
+colnames(geneTraitCor)
+geneTraitCor=geneTraitCor[geneTree$order,]
+head(geneTraitCor)
+labeledHeatmap(Matrix = geneTraitCor,
+               xLabels = colnames(geneTraitCor),
+               xLabelsAngle=90,
+               ySymbols = FALSE,
+               colorLabels = FALSE,
+               colors = blueWhiteRed(30),
+               setStdMargins = FALSE,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Gene-trait relationships"))
+
+
+# module-trait correlations
+# module-trait correlations #1 WITH ONLY SIGNIFICANT CORRELATIONS
+MEcor <- as.data.frame(matrix("NA", nrow = 17, ncol = 17), row.names = rownames(moduleTraitPvalue))
+colnames(MEcor) <- colnames(moduleTraitCor)
+
+for (i in 1:17){
+  for (j in 1:17){
+    MEcor[i,j] <- as.character(ifelse(moduleTraitPvalue[i,j] < 0.1, signif(moduleTraitCor[i,j], 2), as.character("-")))
+  }
+}
+
+windows()
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+                   signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(traits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(30),
+               textMatrix = MEcor, #default is textMatrix
+               setStdMargins = FALSE,
+               cex.text = 0.9, #default is 0.6
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+
+#save the module membership data
+
+moduleMembership_Roberts <- as.data.frame(cbind(colnames(datt), moduleColors))
+colnames(moduleMembership_Roberts)[1] <- "gene"
+
+save(moduleMembership_Roberts, file = "Rob_module_membership_Lovell.R")
+
+
+#################
+# saving selected modules for Fisher-based GO analysis
+
+#load(file = "networkdata_signed.RData")
+#Modules of interest includ: darkgrey, salmon, orangered4, darkgreen, steelblue
+
+moduleList <- c("darkgreen", "green", "lightyellow")
+for (i in moduleList){
+  whichModule= i
+  table(moduleColors==whichModule)
+  genes=row.names(t(datt))[moduleColors==whichModule]
+  fishers=data.frame("gene"=colnames(datt),"inModule"=as.numeric(colnames(datt) %in% genes))
+  table(fishers$inModule)
+  fishers$gene <- sub("ENSGACG", "isogroup", fishers$gene)
+  write.csv(fishers,file=paste(whichModule,"_Rob.csv",sep=""),row.names=F,quote=F)
+}
+
+#################
+#write csv file with gene, kME, module and gene neame
+
+load("Rob_module_membership_Lovell.R")
+geneModuleMembership = as.data.frame(signedKME(datt, MEs))
+geneModuleMembership$gene <- moduleMembership_Roberts$gene
+
+x <- merge(geneModuleMembership, moduleMembership_Roberts, by = "gene")
+head(x)
+
+colnames(x) <- sub("kME", "", colnames(x))
+
+x$kME <- rep(0, nrow(x))
+for (i in 1:nrow(x)){
+  module <- x$moduleColors[i]
+  column <- which(colnames(x) == module)
+  kME.temp <- x[i, column]
+  x$kME[i] <- kME.temp
+}
+
+#add gene names
+ID2Name <- read.csv("GeneID_to_GeneName.csv", header = T)
+head(ID2Name)
+colnames(ID2Name) <-c("gene", "Associated.Gene.Name")
+w <- merge(x, ID2Name, by="gene")
+
+out <- w[, c(1,19,20,21)]
+
+write.csv(out, "Roberts_gene_module_kME.csv", quote = F)

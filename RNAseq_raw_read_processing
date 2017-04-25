@@ -1,0 +1,142 @@
+#Starting with the 96 .gz files
+#-------------------------------
+# unzipping and concatenating sequence files
+
+# creating and launching a cluster job to unzip all files:
+ls *.gz | perl -pe 's/(\S+)/gunzip $1/' > unzip
+launcher_creator.py -j unzip -n unzip
+sbatch unzip.slurm
+
+
+#-------------------------------------------------
+#adaptor trimming and quality filtering
+
+iRNAseq_trim_launch.pl '\.fastq$' > clean
+launcher_creator.py -j clean -n clean
+sbatch clean.slurm
+
+#-------------------------------------------------
+# mapping reads to the transcriptome with bowtie2
+module load bowtie
+
+# creating bowtie2 index for transcriptome in work directory:
+cdw
+bowtie2-build Gasterosteus_aculeatus.BROADS1.cdna.all.fa Gasterosteus_aculeatus.BROADS1.cdna.all.fa
+
+#back to scratch
+cds
+iRNAseq_bowtie2map.pl "trim$" $WORK/Gasterosteus_aculeatus.BROADS1.cdna.all.fa  > mapping
+launcher_creator.py -j mapping -n mapping
+sbatch mapping.slurm
+
+grep "overall alignment rate" mapping.e*
+
+#14.07% overall alignment rate
+#57.07% overall alignment rate
+#54.76% overall alignment rate
+#55.90% overall alignment rate
+#56.82% overall alignment rate
+#50.98% overall alignment rate
+#46.90% overall alignment rate
+#51.55% overall alignment rate
+#47.12% overall alignment rate
+#52.52% overall alignment rate
+#50.24% overall alignment rate
+#56.86% overall alignment rate
+#53.23% overall alignment rate
+#55.42% overall alignment rate
+#51.77% overall alignment rate
+#57.72% overall alignment rate
+#52.64% overall alignment rate
+#48.75% overall alignment rate
+#55.71% overall alignment rate
+#54.01% overall alignment rate
+#54.91% overall alignment rate
+#47.89% overall alignment rate
+#52.67% overall alignment rate
+#51.13% overall alignment rate
+#53.60% overall alignment rate
+#55.02% overall alignment rate
+#50.10% overall alignment rate
+#49.96% overall alignment rate
+#52.43% overall alignment rate
+#52.20% overall alignment rate
+#53.51% overall alignment rate
+#54.07% overall alignment rate
+#53.70% overall alignment rate
+#51.87% overall alignment rate
+#53.63% overall alignment rate
+#59.40% overall alignment rate
+#56.98% overall alignment rate
+#55.84% overall alignment rate
+#54.80% overall alignment rate
+#49.94% overall alignment rate
+#51.18% overall alignment rate
+#56.33% overall alignment rate
+#51.82% overall alignment rate
+#50.17% overall alignment rate
+#50.80% overall alignment rate
+#49.29% overall alignment rate
+#51.62% overall alignment rate
+#58.26% overall alignment rate
+#49.62% overall alignment rate
+#51.37% overall alignment rate
+#49.03% overall alignment rate
+#53.11% overall alignment rate
+#53.19% overall alignment rate
+#51.00% overall alignment rate
+#53.99% overall alignment rate
+#55.05% overall alignment rate
+#59.26% overall alignment rate
+#57.24% overall alignment rate
+#53.20% overall alignment rate
+#58.63% overall alignment rate
+#56.13% overall alignment rate
+#56.50% overall alignment rate
+#55.23% overall alignment rate
+#53.09% overall alignment rate
+#51.46% overall alignment rate
+#55.41% overall alignment rate
+#52.65% overall alignment rate
+#54.69% overall alignment rate
+#53.56% overall alignment rate
+#55.09% overall alignment rate
+#52.25% overall alignment rate
+#56.67% overall alignment rate
+#54.07% overall alignment rate
+#52.85% overall alignment rate
+#51.63% overall alignment rate
+#52.42% overall alignment rate
+#58.70% overall alignment rate
+#51.92% overall alignment rate
+#52.89% overall alignment rate
+#48.57% overall alignment rate
+#52.05% overall alignment rate
+#53.51% overall alignment rate
+#58.70% overall alignment rate
+#54.09% overall alignment rate
+#55.65% overall alignment rate
+#53.21% overall alignment rate
+#54.96% overall alignment rate
+#47.18% overall alignment rate
+#60.26% overall alignment rate
+#52.69% overall alignment rate
+#55.33% overall alignment rate
+#54.79% overall alignment rate
+#61.30% overall alignment rate
+#58.32% overall alignment rate
+#54.82% overall alignment rate
+#61.13% overall alignment rate
+
+#-------------------------------------------------
+#Make seq2iso table
+grep '^>' Gasterosteus_aculeatus.BROADS1.cdna.all.fa | cut -d " " -f 1,4 | sed 's/>//'g | sed 's/gene://g' > GasAcu_seq2iso.tab
+
+# counting hits per isogroup:
+samcount_launch_bt2.pl '\.sam' $WORK/GasAcu_seq2iso.tab > samcount
+launcher_creator.py -j samcount -n samcount
+sbatch samcount.slurm
+
+#--------------------------------------------------
+# assembling them all into a single table:
+expression_compiler.pl *.sam.counts > Heritability_counts.txt

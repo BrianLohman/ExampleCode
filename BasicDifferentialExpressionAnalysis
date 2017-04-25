@@ -1,0 +1,173 @@
+### Heritability Differential Gene Expression Analysis
+#set working directory
+setwd("c:/Users/Lohman/Documents/Stickleback/RNAseq/Heritability_Study")
+
+rm(list = ls())
+library(DESeq2)
+library(BiocParallel)
+register(SnowParam(7))
+
+load("Heritability_Input.RData")
+#rnaDesign.filt <- read.csv("rnaDesignFilt.csv", header = TRUE, row.names = 1)
+
+#-------------------------------------------------------------------
+#USING MIKE LOVE'S SUGGESTION ON NESTING FAMILY INSDIE OF POPULATION
+#construct data object after outlier removal and mean filtering
+
+ddsFullCountTable <- DESeqDataSetFromMatrix(
+	countData = counts.mean.filt,
+	colData = rnaDesign.filt,
+	design = ~ 1
+)
+
+ddsFilt <- ddsFullCountTable
+
+mm <- model.matrix(~ Batch + Population + Population:Family.nested + Status + Population:Status , colData(ddsFilt))
+mm <- mm[, colSums(mm) > 1]
+colSums(mm)
+
+#colSums(mm)
+dim(counts.mean.filt)
+# 18775    98
+summary(rnaDesign.filt)
+#   Population     Family   Family.nested      Status   Batch  Exposed
+# Gosling:57   GG12   : 7   Family1:12    Control :35   A:32   NO :35
+# Roberts:41   GG16   : 6   Family4:11    Exposed :37   B:31   YES:63
+#              GG47   : 6   Family7:11    Infected:26   C:32
+#              RR44   : 6   Family2:10                  D: 3
+#              GG13   : 5   Family5:10
+#              GG17   : 5   Family6:10
+#              (Other):63   (Other):34
+# Infected
+# NO :71
+# YES:27
+
+
+Love_dds <- DESeq(ddsFilt, full = mm, betaPrior = F, parallel = TRUE)
+#estimating size factors
+#estimating dispersions
+#gene-wise dispersion estimates
+#using supplied model matrix
+#mean-dispersion relationship
+#final dispersion estimates
+#using supplied model matrix
+#fitting model and testing
+#using supplied model matrix
+#116 rows did not converge in beta, labelled in mcols(object)$betaConv. Use larger maxit argument with nbinomWaldTest
+
+save(Love_dds, file = "Love_ModelResults.R")
+load("Love_ModelResults.R")
+
+
+#---------------------------------------------------------------------------
+#EXTRACTING RESUTLS
+
+res.pop <- results(Love_dds, independentFiltering = FALSE, name = "PopulationRoberts")
+table(res.pop$padj < 0.05)
+#FALSE  TRUE
+# 8692   361
+table(res.pop$padj < 0.1)
+#FALSE  TRUE
+# 8410   643
+
+res.exposed <- results(Love_dds, independentFiltering = FALSE, name = "StatusExposed")
+table(res.exposed$padj < 0.05)
+#FALSE
+# 9053
+table(res.exposed$padj < 0.1)
+#FALSE
+# 9053
+
+res.infected <- results(Love_dds, independentFiltering = FALSE, name = "StatusInfected")
+table(res.infected$padj < 0.05)
+#FALSE  TRUE
+# 9048     5
+table(res.infected$padj < 0.1)
+#FALSE  TRUE
+# 8989    64
+
+res.interaction <- results(Love_dds, independentFiltering = FALSE, name = "PopulationRoberts.StatusInfected")
+table(res.interaction$padj < 0.05)
+#FALSE  TRUE
+# 9052     1
+table(res.interaction$padj < 0.1)
+#FALSE  TRUE
+# 9037    16
+
+write.csv(res.pop, "Love_Population.csv")
+write.csv(res.exposed, "Love_Exposed.csv")
+write.csv(res.infected, "Love_Infected.csv")
+write.csv(res.interaction, "Love_Interaction18Dec15.csv")
+
+#Now I need to remove the genes for which the model fit is better when Sex is added to the model
+
+pop <- read.csv("Love_Population.csv", header = T, row.names = 1)
+exp <- read.csv("Love_Exposed.csv", header = T, row.names = 1)
+inf <- read.csv("Love_Infected.csv", header = T, row.names = 1)
+inter <- read.csv("Love_Interaction.csv", header = T, row.names = 1)
+sex <- read.csv("Sex_Improved.csv", header = T, row.names = 1)
+
+pop <- na.omit(pop[pop$padj < 0.1 ,])
+table(row.names(pop) %in% row.names(sex))
+#FALSE  TRUE
+#617    51
+
+exp <- na.omit(exp[exp$padj < 0.1 ,])
+table(row.names(exp) %in% row.names(sex))
+#0
+
+inf <- na.omit(inf[inf$padj < 0.1 ,])
+table(row.names(inf) %in% row.names(sex))
+#FALSE  TRUE
+#56     8
+
+inter <- na.omit(inter[inter$padj < 0.1 ,])
+table(row.names(inter) %in% row.names(sex))
+#FALSE  TRUE
+#15     1
+
+#RERUN THE CSV READ IN BEFORE DOING THIS
+pop2 <- pop[!(row.names(pop) %in% row.names(sex)) ,]
+exp2 <- exp[!(row.names(exp) %in% row.names(sex)) ,]
+inf2 <- inf[!(row.names(inf) %in% row.names(sex)) ,]
+inter2 <- inter[!(row.names(inter) %in% row.names(sex)) ,]
+
+write.csv(pop2, "Love_Population_reduced.csv")
+write.csv(exp2, "Love_Exposed_reduced.csv")
+write.csv(inf2, "Love_Infected_reduced.csv")
+write.csv(inter2, "Love_Interaction_reduced.csv")
+
+
+#--------------------------------------------------------------------------------------------------------
+#Answering Jesse's linear modeling questions
+#Does controlling for gran/lymph ratio help explain the changes in expression of MHC II
+vsd <- getVarianceStabilizedData(Love_dds)
+
+#assemble all the data into a single data fram
+info <- rnaDesign.filt
+info$ENSGACG00000000336 <- vsd[row.names(vsd) == "ENSGACG00000000336" ,]
+info$ENSGACG00000017967 <- vsd[row.names(vsd) == "ENSGACG00000017967" ,]
+
+#read in the trait data
+traits <- read.csv("./WGCNA/All Data for h2 WGCNA.csv", header = TRUE, row.names = 1)
+
+#check row order between triats and info matrix
+table(row.names(info) == row.names(traits))
+
+#add Gran to info matrix
+info$Gran <- traits$A_Freq.Gran
+
+#run linear mixed model
+library(lme4)
+library(MASS)
+result_336 <- lmer(formula = ENSGACG00000000336 ~ (1|Batch) + Population  + Status + Gran + (1|Population/Family:Status),
+                data = info
+                )
+summary(result_336)
+
+result_967 <- lmer(formula = ENSGACG00000017967 ~ (1|Batch) + Population  + Status + Gran + (1|Population/Family:Status),
+                   data = info
+              )
+summary(result_967)
+
+#Quick answer: no.

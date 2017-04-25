@@ -1,0 +1,1564 @@
+#Analysis of RNAseq and parasite data from lake-stream reciprocal transplant
+#These result are currently under review at Molecular Ecology
+#Pre-print available on bioRxive: https://doi.org/10.1101/121608
+
+setwd("c:/Users/Lohman/Documents/Stickleback/Stutz Roberts RT")
+rm(list = ls())
+lapply(c("viridis", "DESeq2", "Biobase", "BiocParallel", "arrayQualityMetrics", "magrittr", "data.table", "nlme", "limmaDE2", "statmod", "MASS", "flashClust", "impute", "WGCNA", "fields"), library, character.only = TRUE)
+register(SnowParam(7))
+allowWGCNAThreads(7)
+#======================================================================================================================================
+#LIST OF IN/OUT DATA FILES
+#robertsRTDesign.csv
+#robertsRTcounts.csv
+#roberts_transplant_data_with_parasites.csv
+#DGE_Input.R
+#caging.csv
+#Data_for_LDA_to_Dan.R
+#WGCNA_InputData.R
+#robertsRTInputData.R
+#DESeq2 Model Results.R
+#ComBat_counts.csv
+#TraitsForWGCNA.csv
+#MHC_data.csv
+#1stPassModules.RData
+#signedDissTOM_tree.RData
+#networkdata_signed.RData
+#transcriptome_iso2gene.tab
+#======================================================================================================================================
+#
+# DATA QC AND PREP
+#
+#======================================================================================================================================
+#Reading in data and outlier removal
+#--------------------------------------------------------------
+rnaDesign <- read.csv("robertsRTDesign.csv", header = TRUE, row.names = 1)
+head(rnaDesign)
+summary(rnaDesign)
+
+#read in the counts file
+counts <- read.csv("robertsRTCounts.csv", header = T, row.names = 1)
+dim(counts)
+# 19556    93
+
+#change the names of the samples in the counts matrix
+names(counts) <- sub("R1_001.fastq.trim.sam.counts","",names(counts))
+names(counts) <- sub("_.{12}","", names(counts), perl = TRUE)
+
+#--------------------------------------------------------------
+#identify and remove counts outliners with arrayQualityMetrics
+#base mean min filter = 1
+ddsFullCountTable <- DESeqDataSetFromMatrix(countData = counts, colData = rnaDesign, design = ~ 1)
+dds <- ddsFullCountTable
+vsd <- varianceStabilizingTransformation(dds)
+ExpSet <- ExpressionSet(assay(vsd), AnnotatedDataFrame(as.data.frame(colData(vsd))))
+#arrayQualityMetrics(ExpSet, intgroup = c("Batch", "Treatment", "Origin", "Destination"), force = TRUE)
+
+#outliers are 10,21,25,33,43,57
+counts <- read.csv("robertsRTCounts.csv", header = T, row.names = 1)
+names(counts) <- sub("R1_001.fastq.trim.sam.counts","",names(counts))
+names(counts) <- sub("_.{12}","", names(counts), perl = TRUE)
+fail <- names(counts)[c(10,21,25,33,43,57)]
+counts.filt <- counts[!(names(counts) %in% fail)]
+dim(counts.filt)
+
+rnaDesign.filt <- rnaDesign[(!row.names(rnaDesign) %in% fail),]
+dim(rnaDesign.filt)
+
+#check sample order
+test <- cbind(names(counts.filt),as.vector(row.names(rnaDesign.filt)))
+test
+
+#set base mean minimum (remove genes with mean counts lower than 1 among all samples)
+means <- apply(counts.filt,1,mean)
+table(means>1)
+#FALSE  TRUE
+#9808   9748
+
+means1 <- names(means[means>1])
+length(means1)
+#9748
+
+#subsetting data to only those genes that pass mean > 1
+counts.mean.filt <- counts.filt[row.names(counts.filt) %in% means1,]
+dim(counts.mean.filt)
+
+#check sample order
+test <- cbind(names(counts.mean.filt),as.vector(row.names(rnaDesign.filt)))
+test
+
+#--------------------------------------------------------------
+#add the parasite data to the rnaDesign matrix
+parasiteData <- read.csv("roberts_transplant_data_with_parasites.csv", header = TRUE)
+head(parasiteData)
+
+#cut out the less useful columns
+parasiteData$fishID <- NULL
+parasiteData$origin <- NULL
+parasiteData$transplant <- NULL
+parasiteData$date_in <- NULL
+parasiteData$clip <- NULL
+parasiteData$date_processed <- NULL
+parasiteData$morph_data <- NULL
+parasiteData$dateprocessed <- NULL
+parasiteData$Other <- NULL
+parasiteData$par_data <- NULL
+
+
+#merge the rnaDesign and the parasite data
+rnaDesign.filt$sampleID <- row.names(rnaDesign.filt)
+rnaDesign.filt <- merge(rnaDesign.filt, parasiteData, by = "sampleID")
+row.names(rnaDesign.filt) <- rnaDesign.filt$sampleID
+head(rnaDesign.filt)
+
+#remove the sampleID column
+rnaDesign.filt %<>% .[,-1]
+
+save(rnaDesign.filt, counts.mean.filt, file = "robertsRTInputData.R")
+load("robertsRTInputData.R")
+
+#combine similar parasites into new variables
+rnaDesign.filt$anyCestode <- rnaDesign.filt$Cestode.2 + rnaDesign.filt$Cestode.4 + rnaDesign.filt$Cestode.5..sm. + rnaDesign.filt$Cestode.5..lg. + rnaDesign.filt$Prot.1 + rnaDesign.filt$Prot.2
+rnaDesign.filt$anyNematode <- rnaDesign.filt$Nem.4 + rnaDesign.filt$Nem.6 + rnaDesign.filt$Nem.7 + rnaDesign.filt$Nem.8 + rnaDesign.filt$Nem.9 + rnaDesign.filt$Anisakis + rnaDesign.filt$Eustrongylides + rnaDesign.filt$Capillaria
+rnaDesign.filt$anyDiplostomum <- rnaDesign.filt$Diplostomum + rnaDesign.filt$Diplostomum.2 + rnaDesign.filt$Diplostomum.3
+rnaDesign.filt$anyTrematode <- rnaDesign.filt$Blackspot + rnaDesign.filt$anyDiplostomum + rnaDesign.filt$Crepidostomum + rnaDesign.filt$Bunodera + rnaDesign.filt$Bunoderina
+rnaDesign.filt$anyProt <- rnaDesign.filt$Prot.1 + rnaDesign.filt$Prot.2
+rnaDesign.filt$anyExternal <- rnaDesign.filt$Blackspot + rnaDesign.filt$Thersatina..external. + rnaDesign.filt$Thersatina..Gills.
+rnaDesign.filt$anyInternal <- rnaDesign.filt$Anisakis + rnaDesign.filt$Eustrongylides + rnaDesign.filt$Prot.1 + rnaDesign.filt$Prot.2 + rnaDesign.filt$Nem.4 + rnaDesign.filt$Nem.6 + rnaDesign.filt$Nem.7 + rnaDesign.filt$Nem.8 + rnaDesign.filt$Nem.9 + rnaDesign.filt$Capillaria + rnaDesign.filt$Neoechino. + rnaDesign.filt$Diplostomum + rnaDesign.filt$Diplostomum.2 + rnaDesign.filt$Diplostomum.3 + rnaDesign.filt$Cestode.2 + rnaDesign.filt$Cestode.4 + rnaDesign.filt$Cestode.5..sm. + rnaDesign.filt$Cestode.5..lg. + rnaDesign.filt$Crepidostomum + rnaDesign.filt$Bunodera + rnaDesign.filt$Bunoderina + rnaDesign.filt$Glugea
+rnaDesign.filt$deltaMass <- rnaDesign.filt$post_mass - rnaDesign.filt$pre_mass
+rnaDesign.filt$deltaLength <- rnaDesign.filt$post_length - rnaDesign.filt$pre_length
+rnaDesign.filt$anyBuno <- rnaDesign.filt$Bunodera + rnaDesign.filt$Bunoderina
+rnaDesign.filt$anyGut <- rnaDesign.filt$Anisakis + rnaDesign.filt$Prot.1 + rnaDesign.filt$Prot.2 + rnaDesign.filt$Nem.4 + rnaDesign.filt$Nem.6 + rnaDesign.filt$Nem.7 + rnaDesign.filt$Nem.8 + rnaDesign.filt$Nem.9 + rnaDesign.filt$Capillaria + rnaDesign.filt$Neoechino. + rnaDesign.filt$Cestode.2 + rnaDesign.filt$Cestode.4 + rnaDesign.filt$Cestode.5..sm. + rnaDesign.filt$Cestode.5..lg. + rnaDesign.filt$Crepidostomum + rnaDesign.filt$Bunodera + rnaDesign.filt$Bunoderina
+
+save(rnaDesign.filt, counts.mean.filt, file = "robertsRTInputData.R")
+
+#reorder the columns of the count data to match the rows of the col data
+load("robertsRTInputData.R")
+geneIDs <- row.names(counts.mean.filt)
+library(data.table)
+setDT(counts.mean.filt)
+setcolorder(counts.mean.filt, as.character(row.names(rnaDesign.filt)))
+counts.mean.filt <- as.matrix(counts.mean.filt)
+row.names(counts.mean.filt) <- geneIDs
+save(rnaDesign.filt, counts.mean.filt, file = "robertsRTInputData.R")
+
+
+#======================================================================================================================================
+
+#  DATA ANALYSIS
+
+#======================================================================================================================================
+
+#ANALYSIS OUTLINE
+#1) QC ON THE EXPERIMENT
+#2) DIFFERENTIAL EXPRESSION
+#3) CONVERGENCE WITH LDA
+#4) GO ANALYSIS
+
+#--------------------------------------------------------------
+#1) QC ON THE EXPERIMENT
+#Use two models
+#Plot log fold changes in expression of transplanted fish as a function wild fish
+#Outline: subset fish, run model, make plot
+rm(list = ls())
+load("robertsRTInputData.R")
+
+### CONTROLS
+control.design <- as.data.frame(rnaDesign.filt[rnaDesign.filt$Treatment == "Control" ,]) #select control fish in design matrix
+dim(control.design) #28 control fish
+control.design$Treatment %<>% factor #drop unused factor levels
+
+control.counts <- as.data.frame(counts.mean.filt[, colnames(counts.mean.filt) %in% row.names(control.design)]) #select control fish in counts matrix
+dim(control.counts) #28 columns
+
+#run the model, lake vs stream with control fish only
+stats.controls <- pipeLIMMA(counts = control.counts, info = control.design, block = as.factor(control.design$Batch), formula = "~ + Genotype")
+#stats.controls is a list with three entries, stats, voom, and fstats
+#the object with voom normalized expression is stats.controls$voom$E
+#the object with the treatment log fold changes is stats.controls$stats$GenotypeStream_logFC
+
+#gather significance values
+lmStats.controls <- stats.controls$stats
+sigs.controls <- makeBinarySig(lmStats.controls, what = "ebayesQvalue_GenotypeStream", alpha = 0.05) #vector, binary significance
+
+### NATIVES
+natives.design <- as.data.frame(rnaDesign.filt[rnaDesign.filt$Treatment == "Local" ,]) #select fish transplanted back into thier native habitat in design matrix
+dim(natives.design) #30 fish
+natives.design$Treatment %<>% factor #drop unused factor levesl
+
+natives.counts <- as.data.frame(counts.mean.filt[, colnames(counts.mean.filt) %in% row.names(natives.design)]) #select native transplant fish in counts matrix
+dim(natives.counts) #30 columns
+
+#run the model
+stats.natives <- pipeLIMMA(counts = natives.counts, info = natives.design, block = as.factor(natives.design$Batch), formula = "~ Genotype")
+#stats.natives is a list with three entries, stats, voom, and fstats
+#the object with voom normalized expression is stats.nativess$voom$E
+#the object with lake vs stream log fold changes is stats.natives$stats$GenotypeStream_logFC
+
+#gather significance values
+lmStats.natives <- stats.natives$stats
+sigs.natives <- makeBinarySig(lmStats.natives, what = "Qvalue_GenotypeStream", alpha = 0.05) #vector, binary significance
+
+### MAKE THE PLOT
+#function to change tranparency
+addAlpha <- function(col, alpha=1){
+  if(missing(col))
+    stop("Please provide a vector of colours.")
+  apply(sapply(col, col2rgb)/255, 2,
+        function(x)
+          rgb(x[1], x[2], x[3], alpha=alpha))
+}
+
+windows()
+plot(stats.controls$stats$GenotypeStream_logFC, stats.natives$stats$GenotypeStream_logFC, pch = 16, col = "darkgrey" %<>% addAlpha(.99))
+abline(0,1, col = "red", lwd = 2) #adds 1 to 1 line
+
+find_dist <- function(x,y){
+  abs((x - y)) / (sqrt(2))
+}
+
+resid <- find_dist(stats.controls$stats$GenotypeStream_logFC, stats.natives$stats$GenotypeStream_logFC)
+color <- ifelse(resid > 2, "dodgerblue", "darkgrey")
+
+windows()
+plot(stats.controls$stats$GenotypeStream_logFC, stats.natives$stats$GenotypeStream_logFC,
+     pch = 16,
+     col = color %<>% addAlpha(.50),
+     main = "Do cages represent natural envrionments?",
+     xlab = "Expression in wild-caught controls",
+     ylab = "Expression in native transplants")
+abline(0,1, col = "red", lwd = 2) #adds 1 to 1 line
+legend(-3, 3, c("< 2 LFC from 1:1", "> 2 LFC from 1:1"), col = c("darkgrey", "cornflowerblue"), pch =  16, bty = "n")
+
+lfc_color <- cbind(stats.controls$stats, color)
+deviations <- lfc_color[lfc_color$color != "#A9A9A9A6" ,]
+dim(deviations) # genes total
+head(deviations)
+#65 genes are outside the 2 LFC interval
+
+#Export data for GO analysis
+fisherGO <- cbind(as.character(lfc_color$gene), as.numeric(lfc_color$color))
+head(fisherGO)
+fisherGO[,1] <- sub("ENSGACG", "isogroup", lfc_color[,1])
+fisherGO[,2] <- sub("2", "0", fisherGO[,2])
+colnames(fisherGO) <- c("gene", "inModule")
+write.csv(fisherGO, "./Results/deviations4GO.csv", quote=F, row.names = F)
+
+#--------------------------------------------------------------
+#1.2) QC - WITH THE CLOUD APPROACH
+rm(list = ls())
+load("DGE_Input.R")
+
+# --- Cull the dataset to just the sample you are interested in ---
+rnaDesign.filt$is.control <- rnaDesign.filt$transplant == "Control"
+rnaDesign.filt$is.native <- rnaDesign.filt$Treatment == "Transplant" & rnaDesign.filt$Origin == rnaDesign.filt$Destination
+wh.test<-which(with(rnaDesign.filt, is.control | is.native))
+info<-rnaDesign.filt[wh.test,]
+counts<-counts.mean.filt[,wh.test]
+
+# --- Make a column with the combination of factors you are interested in ---
+info$Treatment = ifelse(info$transplant == "Control", "control","transplant")
+info$trt.origin<-paste(info$Treatment, info$Origin, sep = "_")
+
+table(info$trt.origin)
+
+
+# --- Make a design / contrast matrix
+design <- with(info, model.matrix(~ 0 + trt.origin))
+colnames(design)<-gsub("trt.origin","",colnames(design))
+contrast.matrix <- makeContrasts(
+  transplant_Lake - control_Lake,
+  transplant_Stream - control_Stream,
+  levels = design)
+
+# --- fit a model to the contrast matrix
+stats <- pipeLIMMA(counts = counts,
+                   info = info,
+                   block = info$batch,
+                   design = design,
+                   contrast.matrix = contrast.matrix)
+stats.contrasts <- stats$stats
+
+sigs <- data.frame(makeBinarySig(stats.contrasts, what = "Qvalue", alpha = 0.05))
+
+names(sigs)<-c("sig.a","sig.b")
+
+sigs$sign.a<-sign(stats.contrasts$transplant_Lake...control_Lake_logFC)
+
+sigs$sign.b<-sign(stats.contrasts$transplant_Stream...control_Stream_logFC)
+
+cols<-with(sigs, ifelse(sig.a + sig.b == 0,
+                        "grey",
+                        ifelse(sig.a + sig.b == 2 & sign.a*sign.b == 1,
+                               "pink",
+                               ifelse(sig.a + sig.b == 2 & sign.a*sign.b == -1,
+                                      "cornflowerblue",
+                                      ifelse(sig.a == 1, "darkblue", "darkred")))))
+windows()
+with(stats.contrasts, volcanoPair(lfc1 = stats.contrasts$transplant_Lake...control_Lake_logFC,
+                                  lfc2 = stats.contrasts$transplant_Stream...control_Stream_logFC,
+                                  pt.col = cols %<>% addAlpha(0.99), pt.pch = 19, pt.cex=.5,
+                                  xlab = "Lake Transplant - Lake Control LFC",
+                                  ylab = "Stream Transplant - Stream Control LFC",
+                                  main = "Effect of caging"))
+
+
+
+#--------------------------------------------------------------
+#2) DIFFERENTIAL EXPRESSION
+#Use DESeq2 to look for changes in gene expression, gene-by-gene modeling
+setwd("c:/Users/Lohman/Documents/Stickleback/Stutz Roberts RT/TOTAL RESTART")
+rm(list = ls())
+#Starting the DESeq2 analysis
+#load in the prepared data
+load("DGE_Input.R")
+
+#Start with difference between wild caught - non caged - control fish
+#subset the data frames for only the control fish
+controlRNADesign <- rnaDesign.filt[rnaDesign.filt$transplant == "Control" ,]
+controlCounts <- counts.mean.filt[, row.names((controlRNADesign))]
+
+ddsFullCountTable <- DESeqDataSetFromMatrix(
+  countData = controlCounts,
+  colData = controlRNADesign,
+  design = ~ 1
+)
+
+dds <- ddsFullCountTable
+
+mm <- model.matrix(~ Batch + Treatment, colData(dds))
+mm <- mm[, colSums(mm) > 1]
+colSums(mm)
+
+dds <- DESeq(dds, full = mm, betaPrior = FALSE, parallel = TRUE)
+
+
+controlResults <- results(dds, independentFiltering = FALSE, name = "TreatmentStreamControl")
+table(controlResults$padj < 0.05)
+#FALSE  TRUE
+# 9311  306
+table(controlResults$padj < 0.1)
+#FALSE  TRUE
+# 8970  647
+
+save(dds, controlResults,  file = "./Results/controlModelResults.R")
+write.csv(controlResults, "./Results/controlResults.csv")
+head(controlResults[order(controlResults$padj),], 10)
+
+#probably want to do GO on these model results, but that's about it.
+
+#Export data for GO analysis
+res <- read.csv("./Results/controlResults.csv", header = T, row.names = 1)
+head(res)
+row.names(res) <- sub("ENSGACG", "isogroup", row.names(res))
+logs=data.frame(cbind("gene"=row.names(res),"logP"=(-log(res$pvalue+1e-10,10))))
+logs$logP=as.numeric(as.character(logs$logP))
+sign=rep(1,nrow(logs))
+sign[res$log2FoldChange<0]=-1
+table(sign)
+logs$logP=logs$logP*sign
+logs=logs[complete.cases(logs),]
+write.csv(logs, "./Results/ControlFishLogs4GO.csv", quote=F,row.names=F)
+
+
+#Next up, I'd like to look at the interaction between source and destination
+#select only those fish that were transplanted
+transplantRNADesign <- rnaDesign.filt[rnaDesign.filt$Treatment == "Transplant" ,]
+transplantCounts <- counts.mean.filt[, row.names((transplantRNADesign))]
+
+ddsFullCountTable <- DESeqDataSetFromMatrix(
+  countData = transplantCounts,
+  colData = transplantRNADesign,
+  design = ~ 1
+)
+
+dds <- ddsFullCountTable
+
+mm <- model.matrix(~ Batch + Origin + Destination + Origin:Destination, colData(dds))
+mm <- mm[, colSums(mm) > 1]
+colSums(mm)
+
+dds <- DESeq(dds, full = mm, betaPrior = FALSE, parallel = TRUE)
+
+
+transplantResults <- results(dds, independentFiltering = FALSE, name = "OriginStream.DestinationStream")
+table(transplantResults$padj < 0.05)
+#FALSE  TRUE
+# 9737    4
+table(transplantResults$padj < 0.1)
+#FALSE  TRUE
+# 9731    10
+
+save(dds, transplantResults,  file = "./Results/transplantModelResults.R")
+write.csv(transplantResults, "./Results/transplantResults.csv")
+head(transplantResults[order(transplantResults$padj),], 10)
+
+#Export data for GO analysis
+x <- read.csv("./Results/transplantResults.csv", header = T, row.names = 2)
+head(x)
+row.names(x) <- sub("ENSGACG", "isogroup", row.names(x))
+logs=data.frame(cbind("gene"=row.names(x),"logP"=(-log(x$pvalue+1e-10,10))))
+logs$logP=as.numeric(as.character(logs$logP))
+sign=rep(1,nrow(logs))
+sign[x$log2FoldChange<0]=-1
+table(sign)
+logs$logP=logs$logP*sign
+logs=logs[complete.cases(logs),]
+write.csv(logs, "./Results/Native.vs.NonNativeLogs4GO.csv", quote=F,row.names=F)
+
+
+#not enough significant genes for GO.
+
+#Save the results for Origin and Destination from this model too
+OriginResults <- results(dds, independentFiltering = FALSE, name = "OriginStream")
+table(OriginResults$padj < 0.05)
+#FALSE  TRUE
+# 9268    473
+table(OriginResults$padj < 0.1)
+#FALSE  TRUE
+# 9055  686
+
+write.csv(OriginResults, "./Results/OriginResults.csv")
+
+DestinationResults <- results(dds, independentFiltering = FALSE, name = "DestinationStream")
+table(DestinationResults$padj < 0.05)
+#FALSE  TRUE
+# 9664    77
+table(DestinationResults$padj < 0.1)
+#FALSE  TRUE
+# 9612  129
+
+write.csv(DestinationResults, "./Results/DestinationResults.csv")
+
+#how much overlap is there between the interaction genes and the other factors?
+#are the interaction genes also significant for origin and/or destination
+
+interaction.sig <- as.data.frame(transplantResults[which(transplantResults$padj < 0.1) ,])
+origin.sig <- as.data.frame(OriginResults[which(OriginResults$padj < 0.1) ,])
+destination.sig <- as.data.frame(DestinationResults[which(DestinationResults$padj < 0.1) ,])
+
+rownames(interaction.sig) %in% rownames(origin.sig) #all 10 are significant for origin
+rownames(interaction.sig) %in% rownames(destination.sig) #genes 7 (novel gene) and 8 (cmlc1) are NOT but all others are
+rownames(interaction.sig)
+#[1] "ENSGACG00000001573" "ENSGACG00000003652" "ENSGACG00000005512" "ENSGACG00000008740" "ENSGACG00000009046"
+#[6] "ENSGACG00000009612" "ENSGACG00000009763" "ENSGACG00000010623" "ENSGACG00000012900" "ENSGACG00000013082"
+
+#What is the effect of being transplanted? Compare Lake-Lake/stream-stream to lake-stream/stream-lake
+#This should be very similar, if not the same, as the interaction term above
+transplantRNADesign <- rnaDesign.filt[rnaDesign.filt$Treatment == "Transplant" ,]
+transplantCounts <- counts.mean.filt[, row.names((transplantRNADesign))]
+
+#add a column which indicates if transplants are put back into thier native environment or not
+transplantRNADesign$Native <- transplantRNADesign$Origin == transplantRNADesign$Destination
+
+ddsFullCountTable <- DESeqDataSetFromMatrix(
+  countData = transplantCounts,
+  colData = transplantRNADesign,
+  design = ~ 1
+)
+
+dds <- ddsFullCountTable
+
+mm <- model.matrix(~ Batch + Native, colData(dds))
+mm <- mm[, colSums(mm) > 1]
+colSums(mm)
+
+dds <- DESeq(dds, full = mm, betaPrior = FALSE, parallel = TRUE)
+
+
+transplantResults <- results(dds, independentFiltering = FALSE, name = "NativeTRUE")
+table(transplantResults$padj < 0.05)
+#FALSE  TRUE
+# 9746    2
+table(transplantResults$padj < 0.1)
+#FALSE  TRUE
+# 9742     6
+
+save(dds, transplantResults,  file = "./Results/nativeTransplantModelResults.R")
+write.csv(transplantResults, "./Results/nativeTransplantResults.csv")
+head(transplantResults[order(transplantResults$padj),], 6)
+
+#Export data for GO analysis
+x <- read.csv("./Results/nativeTransplantResults.csv", header = T, row.names = 2)
+head(x)
+row.names(x) <- sub("ENSGACG", "isogroup", row.names(x))
+logs=data.frame(cbind("gene"=row.names(x),"logP"=(-log(x$pvalue+1e-10,10))))
+logs$logP=as.numeric(as.character(logs$logP))
+sign=rep(1,nrow(logs))
+sign[x$log2FoldChange<0]=-1
+table(sign)
+logs$logP=logs$logP*sign
+logs=logs[complete.cases(logs),]
+write.csv(logs, "./Results/Native.vs.NonNativeLogs4GO.csv", quote=F,row.names=F)
+
+#again, not much there. No GO analysis required
+
+#Lastly, wild caught controls vs caged fish (control lake vs lake->lake and control stream vs stream->stream)
+#add a column which indicates if transplants are put back into their native environment or not
+rnaDesign.filt$Native <- rnaDesign.filt$Origin == rnaDesign.filt$Destination
+x <- cbind(as.character(rnaDesign.filt$Treatment), as.character(rnaDesign.filt$Origin), as.character(rnaDesign.filt$Destination))
+
+#write.csv(x, "./Results/caging.csv")
+#change factor levels of NativeStatus in Excel
+#read back in and add new column to design matrix
+caging <- read.csv("./Results/caging.csv", header = T)
+rnaDesign.filt$NativeStatus <- caging$NativeStatus
+
+#remove the nonNative indviduals (those that were transplanted into opposite environments)
+controlNativeRNADesign <- rnaDesign.filt[rnaDesign.filt$NativeStatus != "nonNative" ,]
+controlNativeCounts <- counts.mean.filt[, row.names((controlNativeRNADesign))]
+
+#run the DESeq function
+ddsFullCountTable <- DESeqDataSetFromMatrix(
+  countData = controlNativeCounts,
+  colData = controlNativeRNADesign,
+  design = ~ Batch + NativeStatus
+)
+
+dds <- ddsFullCountTable
+
+dds <- DESeq(dds, betaPrior = FALSE, parallel = TRUE)
+
+#LakeControl (baseline) vs Lake Natives (Lake->Lake transplants)
+nativeStatusLake <- results(dds, independentFiltering = FALSE, name = "NativeStatus_LakeNative_vs_LakeControl")
+table(nativeStatusLake$padj < 0.05)
+#FALSE  TRUE
+# 9721    19
+table(nativeStatusLake$padj < 0.1)
+#FALSE  TRUE
+# 9705    36
+
+write.csv(nativeStatusLake, "./Results/nativeStatusLake.csv")
+head(nativeStatusLake[order(nativeStatusLake$padj),], 10)
+
+#StreamControl vs Stream Natives (Stream -> Stream transplants)
+#relevel so that the Stream control is baseline
+dds$NativeStatus <- relevel(dds$NativeStatus, ref = "StreamControl")
+#rerun the DESeq function
+dds <- DESeq(dds, betaPrior = FALSE, parallel = TRUE)
+
+NativeStatusStream <- results(dds, independentFiltering = FALSE, name = "NativeStatus_StreamNative_vs_StreamControl")
+table(NativeStatusStream$padj < 0.05)
+#FALSE  TRUE
+# 9688    52
+table(NativeStatusStream$padj < 0.1)
+#FALSE  TRUE
+# 9661    79
+
+write.csv(NativeStatusStream, "./Results/nativeStatusStream.csv")
+head(NativeStatusStream[order(NativeStatusStream$padj),], 10)
+
+### Add the gene names to the output files with a loop
+output <- c("./Results/controlResults.csv", "./Results/transplantResults.csv", "./Results/nativeTransplantResults.csv", "./Results/nativeStatusLake.csv", "./Results/nativeStatusStream.csv")
+geneNames <- read.csv("GeneID_to_GeneName.csv", header = TRUE)
+for (i in output){
+  temp <- read.csv(as.character(i))
+  colnames(temp)[1] <- colnames(geneNames)[1]
+  temp2 <- merge(temp, geneNames, by = "Ensembl.Gene.ID", sort = TRUE)
+  temp3 <- temp2[order(temp2$padj) ,]
+  write.csv(temp3, as.character(i))
+}
+
+
+#--------------------------------------------------------------
+#3) CONVERGENCE WITH LDA
+#Estimate size factors -> prcomp -> using $x
+rm(list = ls())
+load("LDA_Input.R")
+ls()
+head(moreData)
+
+
+# LDA on everyone
+Y <- moreData[,63:119]  #90% of variance explaned
+Y <- as.matrix(Y)
+X <- moreData$colorCode
+Y <- Y[X!= "LakeControl" & X!="StreamControl",]
+X.1 <- X[X!= "LakeControl" & X!="StreamControl"]
+X.1 <- factor(as.character(X.1))
+DFA <- lda(Y[,1:40], X.1)
+summary(DFA)
+DFA.x <- predict(DFA)
+DFA
+
+#colors <- substr(as.character(X.1), 1,4) == "Stre" # streams 1 lakes 0
+#colors <- 4-colors
+
+pchval <- 1+ grepl("->",as.character(X.1))*15  # if transplant then filled circle otherwise if native open circle
+
+pchval <- as.numeric(X.1)
+pchval <- sub(1, 16, pchval) #lake genotypes are 1 (lake->stream) and  2 (lake natiave)
+pchval <- sub(2, 16, pchval)
+
+pchval <- sub(3, 17, pchval) #stream genotypes are 3 (stream->lake) and 4 (stream native)
+pchval <- sub(4, 17, pchval)
+
+pchval
+
+#change the colors
+colors2 <- as.numeric(X.1)
+colors2 <- sub(4, 7, colors2)
+colors2 <- sub(3, 4, colors2)
+colors2 <- sub(7, 3, colors2)
+colors2 <- sub(2, 4, colors2)
+colors2 <- sub(1, 3, colors2)
+
+colors2 <- sub(3, "#7fcdbb", colors2) #forestgreen
+colors2 <- sub(4, "#2c7fb8", colors2) #dodgerblue
+
+colors2
+
+#collect means
+m <- as.data.frame(DFA.x$x)
+m$group <- DFA.x$class
+group_means <- apply(m[,1:3], 2, tapply, m$group, mean)
+
+#make the plots
+windows() # dfa 2 gives us lake stream convergence; DFA1 Origin
+plot(x[,1] ~ x[,1], DFA.x, col = colors2, pch = pchval, cex = 2,
+     main = "LDA 1 shows Lake - Stream Divergence")
+legend(-1,2, c("Lake Native", "Stream -> Lake Transplant", "Stream Native", "Lake -> Stream Transplant"), col = c(2,3,4,1), pch = c(1,16,1,16))
+
+key.colors <- c("#2c7fb8","#7fcdbb","#7fcdbb","#2c7fb8")
+
+windows() # DFA 2 gives the convergence of transplanted fish #DESTINATION AND NATIVE/NON-NATIVE STATUSA ARE COLINEAR (DUH)
+plot(x[,2] ~ x[,1], DFA.x, col = colors2 %<>% addAlpha(0.99), pch = as.numeric(pchval), cex = 2,
+     main = "Convergence in LDA space",
+     xlab = "LDA1 (Origin)",
+     ylab = "LDA2 (Destination)",
+     cex.lab = 1.5,
+     cex.axis = 1.5)
+legend(-3,5.5, c("Lake Native", "Lake -> Stream Transplant", "Stream Native", "Stream -> Lake Transplant"), col = key.colors %<>% addAlpha(0.99) , pch = c(16,16,17,17), bty = "n", cex = 1.5)
+
+#arrows(group_means[1,1], group_means[1,2], group_means[4,1], group_means[4,2], lwd = 2, col = "red")
+#arrows(group_means[3,1], group_means[3,2], group_means[2,1], group_means[2,2], lwd = 2, col = "red")
+
+#flipped arrows
+arrows(group_means[2,1], group_means[2,2], group_means[1,1], group_means[1,2], lwd = 2, col = "red")
+arrows(group_means[4,1], group_means[4,2], group_means[3,1], group_means[3,2], lwd = 2, col = "red")
+
+windows() # DFA 3 gives us native/non-native
+plot(x[,3] ~ x[,1], DFA.x, col = colors2, pch = as.numeric(pchval), cex = 2, main = "LDA 3 suggests native vs foreign divergence", xlab = "LD1", ylab = "LD3")
+legend(-2,2, c("Lake Native", "Stream -> Lake Transplant", "Stream Native", "Lake -> Stream Transplant"), col = key.colors %<>% addAlpha(0.99), pch = c(17,16,17,16), bty = 'n')
+
+#addition of histogram to show convergence along LD2. This will probably be a separate plot but added to the Y axis in an image editor
+#start by collecting the LD2 values for every individual with the meta data
+#DFA.x contains these values with the column name as sample ID
+LD2 <- as.data.frame(cbind(as.vector(DFA.x$class), DFA.x$x[,2]))
+LD2
+
+colnames(LD2) <- c("treatment", "LD2")
+
+
+LD2$LD2 <- as.numeric(as.character(LD2$LD2))
+
+levels(LD2$treatment)
+LD2$treatment <- factor(LD2$treatment, levels(LD2$treatment)[c(2,1,3,4)])
+LD2$transplant <- grepl("->",as.character(LD2$treatment))
+LD2$origin <- ifelse(LD2$treatment %in% c("StreamNative", "Stream->Lake"), "stream","lake")
+LD2$destination <- ifelse(LD2$treatment %in% c("LakeNative", "Stream->Lake"), "lake","stream")
+LD2$transplant2 <- LD2$origin == LD2$destination
+
+windows()
+ggplot(LD2, aes(LD2, fill = destination)) +
+  geom_density(aes(alpha = transplant2)) +
+  scale_fill_manual(values = c("#2c7fb8","#7fcdbb")) +
+  scale_alpha_manual(values = c(.2,1))+
+  coord_flip()+
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+windows()
+ggplot(LD2, aes(LD2, fill = treatment)) +
+  geom_density(aes(alpha = treatment)) +
+  scale_fill_manual(values = c("blue", "blue", "green", "green")) +
+  coord_flip()+
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+
+
+#function to add color intensity
+addAlpha <- function(col, alpha=1){
+  if(missing(col))
+    stop("Please provide a vector of colours.")
+  apply(sapply(col, col2rgb)/255, 2,
+        function(x)
+          rgb(x[1], x[2], x[3], alpha=alpha))
+}
+
+#distance calculation
+mean_distances <- dist(group_means)
+#> mean_distances
+#               Lake->Stream LakeNative Stream->Lake
+#LakeNative       6.266496
+#Stream->Lake    13.376712  13.838323
+#StreamNative    12.724026  13.853231     4.245325
+
+base <- 13.853231
+stream.convergence <- 13.838323/base
+stream.convergence #0.9989239
+
+lake.convergence <- 12.724026/(base*-1)
+lake.convergence #-0.918488
+
+#one dimensional distance calculation
+base <- group_means[4,2] - group_means[2,2]
+
+stream.convergence <- (group_means[3,2] - group_means[2,2])/base
+#> stream.convergence
+#[1] 0.4908716
+
+lake.convergence <- (group_means[1,2] - group_means[4,2])/(base*-1)
+#> lake.convergence
+#[1] -0.4636155
+
+######### Misha's DAPC idea
+rm(list = ls())
+load("LDA_Input.R")
+ls()
+head(moreData)
+
+transplants <- moreData[moreData$Treatment == "Transplant" ,]
+transplants$Treatment <- factor(transplants$Treatment)
+transplants$level <- as.numeric(as.factor(paste(transplants$Origin, transplants$Destination, sep = "")))
+
+natives <- transplants[transplants$level == "1" | transplants$level == "4" ,]
+head(natives)
+result <- lda(natives[, 63:149], natives$level)
+
+
+#condition calculation. Is there a correlation between change in mass and distance to centroid (group mean) in LDA space?
+#DFA.x contains LD values for the transplanted fish
+#traits contains the deltaLength/deltaMass data, but also all other data
+load("WGCNA_InputData.R")
+delta.length <- traits[traits$Treatment == "3" , "deltaLength"]
+delta.mass <- traits[traits$Treatment == "3" , "deltaMass"]
+
+condition <- as.data.frame(cbind(DFA.x$class, as.numeric(DFA.x$x[,2]), delta.length, delta.mass))
+rownames(condition) <- rownames(DFA.x$x)
+colnames(condition) <- c("class", "LD2", "delta.length", "delta.mass")
+condition$LD2.flip <- condition$LD2
+condition$LD2.flip[DFA.x$class == "Stream->Lake"] <-  - condition$LD2[DFA.x$class == "Stream->Lake"]
+condition.immigrant <- condition[DFA.x$class == "Stream->Lake" | DFA.x$class == "Lake->Stream",]
+
+plot(delta.length ~ LD2.flip, condition.immigrant, pch  = 16, col = class)
+plot(delta.mass ~ LD2.flip, condition.immigrant, pch  = 16, col = class)
+
+condition$origin <- DFA.x$class
+condition$destination <- DFA.x$class
+
+condition$origin <- sub("StreamNative", "Stream", condition$origin)
+condition$origin <- sub("LakeNative", "Lake", condition$origin)
+condition$origin <- sub("Stream->Lake", "Stream", condition$origin)
+condition$origin <- sub("Lake->Stream", "Lake", condition$origin)
+
+condition$destination <- sub("StreamNative", "Stream", condition$destination)
+condition$destination <- sub("LakeNative", "Lake", condition$destination)
+condition$destination <- sub("Stream->Lake", "Lake", condition$destination)
+condition$destination <- sub("Lake->Stream", "Stream", condition$destination)
+
+
+aov.result <- aov(condition$LD2 ~ origin + destination + origin:destination, data = condition)
+aov.result
+#> aov.result
+#Call:
+#  aov(formula = condition$LD2 ~ origin + destination + origin:destination,
+#      data = condition)
+#
+#Terms:
+#  origin destination origin:destination Residuals
+#Sum of Squares    0.51381   239.07601           55.70465  49.83140
+#Deg. of Freedom         1           1                  1        55
+
+#Residual standard error: 0.9518537
+#Estimated effects may be unbalanced
+summary(aov.result)
+#> summary(aov.result)
+#Df Sum Sq Mean Sq F value   Pr(>F)
+#origin              1   0.51    0.51   0.567    0.455
+#destination         1 239.08  239.08 263.873  < 2e-16 ***
+#  origin:destination  1  55.70   55.70  61.482 1.58e-10 ***
+#  Residuals          55  49.83    0.91
+#---
+#  Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+
+#source and destination effect scatter plot and heat map
+setwd("c:/Users/Lohman/Documents/Stickleback/Stutz Roberts RT/TOTAL RESTART")
+rm(list = ls())
+#Starting the DESeq2 analysis
+#load in the prepared data
+load("DGE_Input.R") #THIS IS A DIFFERENT VERSION OF THE DATA WITH IT CODED DIFFERENTLY!!!
+#Next up, I'd like to look at the interaction between source and destination
+#select only those fish that were transplanted
+transplantRNADesign <- rnaDesign.filt[rnaDesign.filt$Treatment == "Transplant" ,]
+transplantCounts <- counts.mean.filt[, row.names((transplantRNADesign))]
+
+ddsFullCountTable <- DESeqDataSetFromMatrix(
+  countData = transplantCounts,
+  colData = transplantRNADesign,
+  design = ~ 1
+)
+
+dds <- ddsFullCountTable
+
+mm <- model.matrix(~ Batch + Origin + Destination + Origin:Destination, colData(dds))
+mm <- mm[, colSums(mm) > 1]
+colSums(mm)
+
+dds <- DESeq(dds, full = mm, betaPrior = FALSE, parallel = TRUE)
+
+
+res.origin <- results(dds, independentFiltering = FALSE, name = "OriginStream")
+
+geneNames <- read.csv("GeneID_to_GeneName.csv", header = TRUE)
+res.origin$Ensembl.Gene.ID <- rownames(res.origin)
+res.origin.named <- merge(as.data.frame(res.origin), geneNames, by = "Ensembl.Gene.ID")
+#write.csv(res.origin.named, file = "Transplants_origin.csv")
+table(res.origin$padj < 0.1)
+#FALSE  TRUE
+#9055   686
+
+
+res.destination <- results(dds, independentFiltering = FALSE, name = "DestinationStream")
+geneNames <- read.csv("GeneID_to_GeneName.csv", header = TRUE)
+res.destination$Ensembl.Gene.ID <- rownames(res.destination)
+res.destination.named <- merge(as.data.frame(res.destination), geneNames, by = "Ensembl.Gene.ID")
+#write.csv(res.destination.named, file = "Transplants_destinaion.csv")
+table(res.destination$padj < 0.1)
+#FALSE  TRUE
+#9612   129
+
+sigA <- as.numeric(res.origin$padj < 0.05)
+sigB <- as.numeric(res.destination$padj < 0.05)
+
+
+#color points according to the predictor for which they are significant
+sig.origin <- sigA
+sig.origin <- sub(1, "dodgerblue", sig.origin)
+
+sig.destination <- sigB
+sig.destination <- sub(1, "firebrick", sig.destination)
+
+sig.both <- sigA + sigB
+sig.both <- sub(2, "darkorchid", sig.both)
+sig.both <- sub(1, "0", sig.both)
+
+
+#sigs <- sigA + sigB
+#sigs[is.na(sigs)] <- 0
+#sigs <- sub(2, 1, sigs)
+#sigs <- sub(1, "red", sigs)
+#sigs <- sub(0, "grey", sigs)
+
+windows()
+plot(x = res.origin$log2FoldChange,
+     y = res.destination$log2FoldChange,
+     pch = 16,
+     col =  "grey" %<>% addAlpha(0.40),
+     main = "Gene-by-gene convergence\nTransplanted Fish Only",
+     xlab = "Origin (Lake-Stream)",
+     ylab = "Destination (Lake-Stream)",
+     cex.axis = 1.25,
+     cex.lab = 1.25)
+abline(v=0, col = "grey", lty = 2)
+abline(h=0, col = "grey", lty = 2)
+points(x = res.origin$log2FoldChange, y = res.destination$log2FoldChange, col = sig.origin, pch = 16)
+points(x = res.origin$log2FoldChange, y = res.destination$log2FoldChange, col = sig.destination, pch = 16)
+points(x = res.origin$log2FoldChange, y = res.destination$log2FoldChange, col = sig.both, pch = 16)
+legend(-26, 9, c("Origin Effect (473)", "Destination Effect (77)", "Both (34)", "Not significant (9194)"), col = c("dodgerblue", "firebrick", "darkorchid", "grey"), pch =  16, bty = "n", cex = 1.25)
+abline(0,1, col = "red", lty = 2)
+
+cor.result <- cor(res.origin$log2FoldChange, res.destination$log2FoldChange)
+cor.result
+#> cor.result
+#[1,] 0.6707619
+
+lm.result <- lm(res.destination$log2FoldChange ~ res.origin$log2FoldChange)
+summary(lm.result)
+#Call:
+#  lm(formula = res.destination$log2FoldChange ~ res.origin$log2FoldChange)
+
+#Residuals:
+#  Min      1Q  Median      3Q     Max
+#-5.2930 -0.2441 -0.0253  0.2126  5.4245
+
+#Coefficients:
+#  Estimate Std. Error t value Pr(>|t|)
+#(Intercept)               0.054473   0.005201   10.47   <2e-16 ***
+#  res.origin$log2FoldChange 0.423926   0.004748   89.28   <2e-16 ***
+#  ---
+#  Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+
+#Residual standard error: 0.5134 on 9746 degrees of freedom
+#Multiple R-squared:  0.4499,	Adjusted R-squared:  0.4499
+#F-statistic:  7971 on 1 and 9746 DF,  p-value: < 2.2e-16
+
+#with p-values instead
+windows()
+plot(x = -log(res.origin$padj),
+     y = -log(res.destination$padj),
+     pch = 16,
+     col =  sigs %<>% addAlpha(0.70),
+     main = "Gene-by-gene convergence\nTransplanted Fish Only",
+     xlab = "Origin (Lake-Stream -log(p-value))",
+     ylab = "Destination (Lake-Stream -log(p-value))")
+abline(v=0, col = "grey", lty = 2)
+abline(h=0, col = "grey", lty = 2)
+
+#Lovell volcanoPair
+library(limmaDE2)
+windows()
+volcanoPair(lfc1 = res.origin$log2FoldChange,
+            lfc2 = res.destination$log2FoldChange,
+            main = "Gene-by-gene convergence\nTransplanted Fish Only",
+            xlab = "Origin (Lake-Stream)",
+            ylab = "Destination (Lake-Stream)",
+            sig1 = sigA,
+            sig2 = sigB)
+
+
+#what is the overlap between the wild and transplanted origin/genotype effect?
+wild <- controlResults
+head(wild)
+
+wild.01 <- wild[wild$padj < 0.1 ,]
+dim(wild.01)
+
+trans <- res.origin
+trans.01 <- trans[trans$padj < 0.1 ,]
+dim(trans.01)
+
+table(row.names(wild.01) %in% row.names(trans.01))
+table(row.names(trans.01) %in% row.names(wild.01))
+
+#--------------------------------------------------------------
+#4) GO ANALYSIS - Following Matz et al.
+
+setwd("c:/Users/Lohman/Documents/Stickleback/Stutz Roberts RT/WGCNA")
+rm(list = ls())
+# Edit these to match your data file names:
+input="yellow_RobRT_FishkME.csv" # two columns of comma-separated values: gene id, continuous measure of significance. To perform standard GO enrichment analysis based on Fisher's exact test, use binary measure (0 or 1, i.e., either sgnificant or not).
+goAnnotations="transcriptome_iso2go.tab" # two-column, tab-delimited, one line per gene, multiple GO terms separated by semicolon. If you have multiple lines per gene, use nrify_GOtable.pl prior to running this script.
+goDatabase="go.obo" # download from http://www.geneontology.org/GO.downloads.ontology.shtml
+goDivision="MF" # either MF, or BP, or CC
+source("gomwu.functions.R")
+
+
+# Calculating stats. It might take ~3 min for MF and BP. Do not rerun it if you just want to replot the data with different cutoffs, go straight to gomwuPlot. If you change any of the numeric values below, delete the files that were generated in previos runs first.
+gomwuStats(input, goDatabase, goAnnotations, goDivision,
+           perlPath="perl", # replace with full path to perl executable if it is not in your system's PATH already
+           largest=0.1,  # a GO category will not be considered if it contains more than this fraction of the total number of genes
+           smallest=5,   # a GO category should contain at least this many genes to be considered
+           clusterCutHeight=0.25, # threshold for merging similar (gene-sharing) terms. See README for details.
+           #	Alternative="g" # by default the MWU test is two-tailed; specify "g" or "l" of you want to test for "greater" or "less" instead.
+           Module=TRUE,Alternative="g" # un-remark this if you are analyzing a SIGNED WGCNA module (values: 0 for not in module genes, kME for in-module genes). In the call to gomwuPlot below, specify absValue=0.001 (count number of "good genes" that fall into the module)
+           #	Module=TRUE # un-remark this if you are analyzing an UNSIGNED WGCNA module
+)
+# do not continue if the printout shows that no GO terms pass 10% FDR.
+
+
+# Plotting results
+windows()
+gomwuPlot(input,goAnnotations,goDivision,
+          absValue=0.001,  # genes with the measure value exceeding this will be counted as "good genes". Specify absValue=0.001 if you are doing Fisher's exact test for standard GO enrichment or analyzing a WGCNA module (all non-zero genes = "good genes").
+          level1=0.1, # FDR threshold for plotting. Specify level1=1 to plot all GO categories containing genes exceeding the absValue.
+          level2=0.05, # FDR cutoff to print in regular (not italic) font.
+          level3=0.01, # FDR cutoff to print in large bold font.
+          txtsize=1.2,    # decrease to fit more on one page, or increase (after rescaling the plot so the tree fits the text) for better "word cloud" effect
+          treeHeight=0.5, # height of the hierarchical clustering tree
+          #	colors=c("dodgerblue2","firebrick1","skyblue","lightcoral") # these are default colors, un-remar and change if needed
+)
+
+#results
+#blue:CC: 43 MF: 22 BP: 87
+#brown:CC: 1 MF: 2  BP: 0
+#green:CC: 3  MF: 2 BP: 1
+#turquoise:CC: 71 MF: 72 BP: 254
+#yellow:CC: 22 MF:  BP: 1
+
+
+#--------------------------------------------------------------
+#4) WGCNA
+setwd("c:/Users/Lohman/Documents/Stickleback/Stutz Roberts RT")
+rm(list = ls())
+#Data preparation
+options(stringsAsFactors=FALSE)
+allowWGCNAThreads(7)
+library(limmaDE2)
+
+load("DGE_Input.R")
+
+rnaDesign.filt <- cbind(rnaDesign.filt, traits[,53:58])
+
+#normalizing with limma
+counts <- counts.mean.filt
+info <- rnaDesign.filt
+
+stats <- pipeLIMMA(counts = counts,
+                   info = info,
+                   block = NULL,
+                   formula = "~ Batch")
+
+lmStats <- stats$stats
+voom <- stats$voom$E #this is the voom normalized expression matrix
+datt <- t(voom)
+traits <- rnaDesign.filt
+
+#read in the vsd for saving data for GO
+load("RobertsRTInputData.R")
+library(DESeq2)
+vsd <- varianceStabilizingTransformation(counts.mean.filt)
+
+#save(datt, traits, vsd, file = "WGCNA_InputData.R")
+load("WGCNA_InputData.R")
+
+#add columns for parasite diversity and shannon index to the trait matrix
+head(traits[,17:41]) #portion of the data frame with individual parasite data
+
+#parasite diversity
+traits$parasiteDiversity <- c(rep(0, nrow(traits)))
+for (i in 1:87){ #rows
+  for (j in 17:41){ #columns
+    if (traits[i,j] != 0){
+      traits$parasiteDiversity[i] <- traits$parasiteDiversity[i] + 1
+    }
+  }
+}
+
+#shannon diversity index
+library(vegan)
+traits$shannonDiversity <- diversity(traits[,17:41])
+
+#save(datt, traits, vsd, file = "WGCNA_InputData.R")
+load("WGCNA_InputData.R")
+
+#add in the MHC data
+MHC <- read.csv("MHC_data.csv") #I want [,c(59,506,508,510)]
+mhc.select <- MHC[MHC$sampleID  %in%  row.names(traits), c(2,59,506,508,510)]
+dim(mhc.select)
+traits <- cbind(traits, mhc.select[,2:5])
+dim(traits)
+
+#remove less useful columns
+traits$date_in <- NULL
+traits$fishID <- NULL
+traits$par_data <- NULL
+traits$Other <- NULL
+traits$dateprocessed <- NULL
+traits$morph_data <- NULL
+traits$clip <- NULL
+traits$Treatment <- as.numeric(traits$Treatment)
+traits$Origin <- as.numeric(traits$Origin)
+traits$Destination <- as.numeric(traits$Destination)
+traits$origin <- NULL
+traits$transplant <- NULL
+traits$sex <- as.numeric(traits$sex)
+traits$date_processed <- NULL
+traits$Batch <- NULL
+traits$enclosure <- NULL
+
+save(datt, traits, vsd, file = "WGCNA_InputData.R")
+
+# Start HERE ---------------------------------------------
+load("WGCNA_InputData.R")
+
+#size correction for morphology data
+#log(trait) ~ log(size) and extract residuals
+#post_length is the column which has the size measurements we'll use
+
+pw.sc <- lm(log(traits$pw) ~ log(traits$post_length))
+pw.sc <- pw.sc$residuals
+
+bd.sc <- lm(log(traits$bd) ~ log(traits$post_length))
+bd.sc <- bd.sc$residuals
+
+gw.sc <- lm(log(traits$gw) ~ log(traits$post_length))
+gw.sc <- gw.sc$residuals
+
+grn.sc <- lm(log(traits$grn) ~ log(traits$post_length))
+grn.sc <- grn.sc$residuals
+
+grl.sc <- lm(log(traits$grl) ~ log(traits$post_length))
+grl.sc <- grl.sc$residuals
+
+traits$pw <- pw.sc
+traits$bd <- bd.sc
+traits$gw <- gw.sc
+traits$grn <- grn.sc
+traits$grl <- grl.sc
+
+#save(datt, traits, vsd, file = "WGCNA_InputData.R")
+
+####################
+load("WGCNA_InputData.R")
+
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=28, by=1))
+# Call the network topology analysis function
+sft = pickSoftThreshold(datt, powerVector = powers, verbose = 5,networkType="signed")
+# Plot the results:
+#sizeGrWindow(9, 5)
+#pdf("soft_threshold_signed.pdf",height=4, width=8)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+#dev.off()
+
+#####################
+# making modules
+
+s.th=6 # re-specify according to previous section
+adjacency = adjacency(datt, power = s.th,type="signed");
+TOM = TOMsimilarity(adjacency,TOMType="signed");
+dissTOM = 1-TOM
+# Call the hierarchical clustering function
+geneTree = flashClust(as.dist(dissTOM), method = "average");
+
+save(dissTOM,geneTree,file="signedDissTOM_tree.RData")
+
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize = 30;
+# Module identification using dynamic tree cut:
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM,
+                            deepSplit = 2, pamRespectsDendro = FALSE,
+                            minClusterSize = minModuleSize);
+table(dynamicMods)
+dynamicColors = labels2colors(dynamicMods)
+
+# Calculate eigengenes
+MEList = moduleEigengenes(datt, colors = dynamicColors)
+MEs = MEList$eigengenes
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs);
+METree = flashClust(as.dist(MEDiss), method = "average");
+
+save(dynamicMods,dynamicColors,MEs,METree,geneTree,file="1stPassModules.RData")
+
+#########################
+
+load("1stPassModules.RData")
+
+sizeGrWindow(7, 6)
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+MEDissThres = 0.2
+# Plot the cut line into the dendrogram
+abline(h=MEDissThres, col = "red")
+
+# Call an automatic merging function
+merge = mergeCloseModules(datt, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+# The merged module colors
+mergedColors = merge$colors;
+# Eigengenes of the new merged modules:
+mergedMEs = merge$newMEs
+
+# plotting the fabulous ridiculogram
+windows()
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+
+# Rename to moduleColors
+moduleColors = mergedColors
+# Construct numerical labels corresponding to the colors
+colorOrder = c("grey", standardColors(50));
+moduleLabels = match(moduleColors, colorOrder)-1;
+MEs = mergedMEs;
+
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs);
+# Cluster module eigengenes
+METree = flashClust(as.dist(MEDiss), method = "average");
+# Plot the result
+sizeGrWindow(7, 6)
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+
+# how many genes in each module?
+table(moduleColors)
+#moduleColors
+#black        blue       brown       green greenyellow
+#317        1726        1542         636          60
+#magenta        pink      purple         red   turquoise
+#252         284          64         578        3463
+#yellow
+#826
+
+# Save module colors and labels for use in subsequent parts
+save(MEs, geneTree, moduleLabels, moduleColors, file = "networkdata_signed.RData")
+
+###################
+# plotting correlations with traits:
+load("networkdata_signed.RData")
+load("WGCNA_InputData.R")
+library(gapmap)
+
+# Define numbers of genes and samples
+nGenes = ncol(datt);
+nSamples = nrow(datt);
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(datt, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+
+# correlations of genes with eigengenes
+moduleGeneCor=cor(MEs,datt)
+moduleGenePvalue = corPvalueStudent(moduleGeneCor, nSamples);
+
+moduleTraitCor = cor(MEs, traits, use = "p");
+
+#USE THIS LINE TO CHANGE THE NUMBEER OF TRAITS IN THE PLOT.
+#Generate a separte object for each of the module trait plots, and calculate module trait corrlation separately
+
+traits1 <- as.data.frame(cbind(traits$Origin, traits$pw, traits$bd, traits$gw, traits$grn, traits$grl, traits$sex, traits$anyCestode, traits$anyNematode, traits$anyDiplostomum, traits$anyTrematode, traits$anyProt, traits$anyExternal, traits$anyInternal, traits$anyBuno, traits$anyGut, traits$parasiteDiversity, traits$shannonDiversity, traits$true_alleles, traits$mhcLD1, traits$mhcLD2, traits$mhcDCA))
+colnames(traits1) <- c("Origin", "pw", "bd", "gw", "grn", "grl", "sex", "anyCestode", "anyNematode", "anyDiplostomum", "anyTrematode", "anyProt", "anyExternal", "anyInternal", "anyBuno", "anyGut", "parasiteDiversity", "shannonDiversity", "true_alleles", "mhcLD1", "mhcLD2", "mhcDCA")
+moduleTraitCor1 = cor(MEs, traits1, use = "p");
+moduleTraitPvalue1 = corPvalueStudent(moduleTraitCor1, nSamples);
+
+traits2 <- as.data.frame(cbind(traits$Origin, traits$Destination, traits$deltaMass, traits$deltaLength))
+colnames(traits2) <- c( "Origin", "Destination", "deltaMass", "deltaLength")
+moduleTraitCor2 = cor(MEs, traits2, use = "p");
+moduleTraitPvalue2 = corPvalueStudent(moduleTraitCor2, nSamples);
+
+# # gene-trait correlations - to make augmented ridiculogram as in mice-men-embryos paper
+windows()
+par(mar = c(8, 3, 3, 3))
+geneTraitCor = cor(datt, traits3 <- cbind(traits1, traits2), use = "p");
+colnames(geneTraitCor)
+geneTraitCor=geneTraitCor[geneTree$order,]
+head(geneTraitCor)
+labeledHeatmap(Matrix = geneTraitCor,
+               xLabels = colnames(geneTraitCor),
+               xLabelsAngle=90,
+               ySymbols = FALSE,
+               colorLabels = FALSE,
+               colors = blueWhiteRed(30),
+               setStdMargins = FALSE,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Gene-trait relationships"))
+
+# module-trait correlations #1
+windows()
+textMatrix = paste(signif(moduleTraitCor1, 2), "\n(",
+                   signif(moduleTraitPvalue1, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor1)
+par(mar = c(6, 9, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor1,
+               xLabels = names(traits1),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(30),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.6,
+               zlim = c(-0.5,0.5),
+               main = paste("Module-trait relationships Lake vs Stream"))
+
+# module-trait correlations #1 WITH ONLY SIGNIFICANT CORRELATIONS
+MEcor <- as.data.frame(matrix("NA", nrow = 11, ncol = 22), row.names = rownames(moduleTraitPvalue1))
+colnames(MEcor) <- colnames(moduleTraitCor1)
+
+for (i in 1:11){
+  for (j in 1:22){
+    MEcor[i,j] <- as.character(ifelse(moduleTraitPvalue1[i,j] < 0.1, signif(moduleTraitCor1[i,j], 2), as.character("-")))
+  }
+}
+
+#MEcor
+
+dim(textMatrix) = dim(moduleTraitCor1)
+windows()
+par(mar = c(6, 9, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor1,
+               xLabels = names(traits1),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(30),
+               textMatrix = MEcor,
+               setStdMargins = FALSE,
+               cex.text = 0.9,
+               zlim = c(-0.5,0.5),
+               main = paste("Module-trait relationships Lake vs Stream"))
+
+# module-trait correlations #2
+windows()
+textMatrix = paste(signif(moduleTraitCor2, 2), "\n(",
+                   signif(moduleTraitPvalue2, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor2)
+par(mar = c(4, 8, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor2,
+               xLabels = names(traits2),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(30),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.9,
+               zlim = c(-0.5,0.5),
+               main = paste("Module-trait relationships Transplant"))
+
+
+# module-trait correlations #2 WITH ONLY SIGNIFICANT CORRELATIONS
+MEcor <- as.data.frame(matrix("NA", nrow = 11, ncol = 4), row.names = rownames(moduleTraitPvalue2))
+colnames(MEcor) <- colnames(moduleTraitCor2)
+
+for (i in 1:11){
+  for (j in 1:4){
+    MEcor[i,j] <- as.character(ifelse(moduleTraitPvalue2[i,j] < 0.1, signif(moduleTraitCor2[i,j], 2), as.character("-")))
+  }
+}
+
+windows()
+dim(textMatrix) = dim(moduleTraitCor2)
+par(mar = c(4, 8, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor2,
+               xLabels = names(traits2),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(30),
+               textMatrix = MEcor,
+               setStdMargins = FALSE,
+               cex.text = 0.9,
+               zlim = c(-0.5,0.5),
+               main = paste("Module-trait relationships Transplant"))
+
+#############
+#save data for GO analysis
+geneModuleMembership = as.data.frame(signedKME(datt, MEs))
+moduleList <- c("blue", "brown", "green", "turquoise", "yellow" )
+for (i in moduleList){
+  whichModule= i
+  table(moduleColors==whichModule)
+  genes=row.names(t(datt))[moduleColors==whichModule]
+  module_genes <- colnames(datt) %in% genes
+  fishers=data.frame("gene"=colnames(datt),"Fish_kME"= geneModuleMembership[, paste("kME", i, sep = "")])
+  fishers[,2][module_genes == FALSE] <- 0
+  table(fishers$Fish_kME == 0)
+  fishers$gene <- sub("ENSGACG", "isogroup", fishers$gene)
+  write.csv(fishers,file=paste(whichModule,"_RobRT_FishkME.csv",sep=""),row.names=F,quote=F)
+}
+
+#############
+#scatter plots to augment the heatmap
+#greenyellow: shannonDiversity vs true_alleles
+#purple: anyNematode vs mhcLD1
+#red: anyProt vs sample correlation (kME?)
+
+#greenyellow
+windows()
+plot(traits$true_alleles ~ MEs$MEgreenyellow,
+     ylim = c(0,10),
+     pch = 16,
+     col ="forestgreen",
+     main = "MEgreenyellow is positively correlated with # of MHC alleles\nand negatively corelated with parasite diversity")
+abline(lm(traits$true_alleles ~ MEs$MEgreenyellow), lty = 2, col = "red", lwd = 2)
+points(MEs$MEgreenyellow, traits$shannonDiversity, pch = 16, col = "royalblue")
+abline(lm(traits$shannonDiversity ~ MEs$MEgreenyellow), lty = 2, col = "red", lwd = 2)
+
+x <- as.data.frame(cbind(traits$shannonDiversity,traits$true_alleles,MEs$MEgreenyellow))
+x <- na.omit(x)
+
+xy <- na.omit(x)[,2:1]
+z <- na.omit(x)[,3]
+
+surface.fit <- Tps(xy, z, m=3)
+surface <- predictSurface(surface.fit)
+windows()
+png(filename = "MHC Shannon Greenyellow.png", width = 1300, height = 1300)
+plot.surface(surface,
+             type = "C",
+             xlab = "Number of alleles",
+             ylab = "Shannon diversity",
+             zlab = "greenyellow expression",
+             main = "Expression of greenyellow is correlated\nwith MHC alle # and Shannon diversity",
+             col = plasma(256),
+             cex.axis = 1.5,
+             cex.lab = 1.5,
+             cex.main = 1,
+             labcex = 1.5,
+             ylim = c(-0.05, max(x$V1))
+             )
+points(jitter(xy[,1], amount = 0.075), xy[,2], pch = 21, cex = 2, bg = "white" %<>% addAlpha(0.99), col = "black", lwd = 2)
+dev.off()
+
+
+#red
+windows()
+plot(jitter(traits$anyProt) ~ MEs$MEred,
+     col = "black" %<>% addAlpha(0.99),
+     pch = 16,
+     main = "Increased expression of MEred \nis correlated with infection by Protzoans",
+     xlab = "MEred expression",
+     ylab = "Infection by any Protozoan",
+     cex.lab = 1.5,
+     cex.axis = 1.5,
+     cex = 1.5
+     )
+abline(lm(traits$anyProt ~ MEs$MEred), lty = 2, col = "red", lwd = 2)
+
+#purple
+windows()
+plot(jitter(traits$anyNematode, amount = 0.05) ~ MEs$MEpurple,
+     col = "black" %<>% addAlpha(0.99),
+     pch = 16,
+     main = "Increased expression of MEpurple \nis correlated with infection by Nematodes",
+     xlab = "MEpruple expression",
+     ylab = "Infection by any Nematodes",
+     cex.lab = 1.5,
+     cex.axis = 1.5,
+     cex = 1.5,
+     yaxt='n'
+     )
+abline(lm(traits$anyNematode ~ MEs$MEpurple), lty = 2, col = "red", lwd = 2)
+axis(side = 2, at = c(seq(0,12,1)), cex.axis = 1.5)
+
+
+
+
+
+#############
+# scatterplots of gene significance (correlation-based) vs kME
+#load("networkdata_signed.RData")
+#table(moduleColors)
+
+whichTrait="shannonDiversity"
+
+nGenes = ncol(datt);
+nSamples = nrow(datt);
+selTrait = as.data.frame(traits[,whichTrait]);
+names(selTrait) = whichTrait
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(signedKME(datt, MEs));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples));
+names(geneModuleMembership) = paste("MM", modNames, sep="");
+names(MMPvalue) = paste("p.MM", modNames, sep="");
+geneTraitSignificance = as.data.frame(cor(datt, selTrait, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+names(geneTraitSignificance) = paste("GS.", names(selTrait), sep="");
+names(GSPvalue) = paste("p.GS.", names(selTrait), sep="");
+windows()
+par(mfrow=c(3,4))
+counter=0
+for(module in modNames[1:length(modNames)]){
+  counter=counter+1
+  #if (counter>9) {
+  #	windows()
+  #	par(mfrow=c(3,4))
+  #	counter=1
+  #}
+  column = match(module, modNames);
+  moduleGenes = moduleColors==module;
+  #trr="heat resistance"
+  verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                     abs(geneTraitSignificance[moduleGenes, 1]),
+                     xlab = paste(module,"module membership"),
+                     ylab = paste("GS for", whichTrait),
+                     col = "grey60",mgp=c(2.3,1,0))
+}
+
+################
+# eigengene-heatmap plot
+#load("networkdata_signed.RData")
+
+which.module="turquoise"
+datME=MEs
+datExpr=datt
+datExpr <- datExpr[order(datME$MElightyellow, decreasing = T) ,]
+
+windows()
+ME=datME[order(datME$MEturquoise, decreasing = T) , paste("ME",which.module, sep="")]
+par(mfrow=c(2,1), mar=c(0.3, 5.5, 3, 2))
+plotMat(t(scale(datExpr[,moduleColors==which.module ])), #clabels = rownames(datExpr). Order the datExpr by eigen gene expression
+        nrgcols=30,rlabels=F,rcols=which.module,
+        clabels = rownames(datExpr),
+        main=which.module, cex.main=2)
+par(mar=c(5, 4.2, 0, 0.7))
+barplot(ME, col=which.module, main="", cex.main=2,
+        ylab="eigengene expression",xlab="sample")
+
+length(datExpr[1,moduleColors==which.module ])
+
+#orangered4Genes <- datExpr[1,moduleColors==which.module ]
+#write.csv(orangered4Genes, "Orangered4Genes.csv")
+#################
+# saving selected modules for Fisher-based GO analysis
+
+#load(file = "networkdata_signed.RData")
+#Modules of interest includ: darkgrey, salmon, orangered4, darkgreen, steelblue
+
+whichModule="white"
+
+table(moduleColors==whichModule)
+genes=row.names(t(datt))[moduleColors==whichModule]
+fishers=data.frame("gene"=row.names(vsd),"inModule"=as.numeric(row.names(vsd) %in% genes))
+table(fishers$inModule)
+write.csv(fishers,file=paste(whichModule,".csv",sep=""),row.names=F,quote=F)
+
+################
+# plotting heatmap for named top-kME genes
+
+#load("networkdata_signed.RData")
+
+degs <- t(datt)
+
+allkME =as.data.frame(signedKME(t(degs), MEs))
+gg=read.table("transcriptome_iso2gene.tab",sep="\t")
+head(gg)
+library(pheatmap)
+
+whichModule="darkred"
+top=7
+
+datME=MEs
+datExpr=t(degs)
+modcol=paste("kME",whichModule,sep="")
+sorted=degs[order(allkME[,modcol],decreasing=T),]
+head(sorted)
+# selection top N names genes, attaching gene names
+gnames=c();counts=0;hubs=c()
+for(i in 1:length(sorted[,1])) {
+  if (row.names(sorted)[i] %in% gg$V1) {
+    counts=counts+1
+    gn=gg[gg$V1==row.names(sorted)[i],2]
+    gn=paste(gn,row.names(sorted)[i],sep=".")
+    if (gn %in% gnames) {
+      gn=paste(gn,counts,sep=".")
+    }
+    gnames=append(gnames,gn)
+    hubs=data.frame(rbind(hubs,sorted[i,]))
+    if (counts==top) {break}
+  }
+}
+row.names(hubs)=gnames
+
+contrasting = colorRampPalette(rev(c("chocolate1","#FEE090","grey10", "cyan3","cyan")))(100)
+contrasting2 = colorRampPalette(rev(c("chocolate1","chocolate1","#FEE090","grey10", "cyan3","cyan")))(100)
+contrasting3 = colorRampPalette(rev(c("chocolate1","#FEE090","grey10", "cyan3","cyan","cyan")))(100)
+
+windows()
+#pdf("orangered5.pdf", height = 3, width = 27)
+pheatmap(hubs,scale="row",col=contrasting,border_color=NA,treeheight_col=0,cluster_rows=F)
+#dev.off()
